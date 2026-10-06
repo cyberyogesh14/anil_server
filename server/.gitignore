@@ -1,0 +1,12 @@
+node_modules/
+.env
+uploads/*
+!uploads/.gitkeep
+
+# Load test artefacts: disposable replica-set data, throwaway tokens and results.
+# Nothing here is ever meant to be committed.
+scripts/loadtest/.loadtest-dbpath/
+scripts/loadtest/.loadtest-db-uri
+scripts/loadtest/.loadtest-tokens.json
+scripts/loadtest/.loadtest-raw.json
+scripts/loadtest/.loadtest-*.json

@@ -69,7 +69,7 @@ module.exports = function buildScenarios(tokens) {
   const SEARCH_TERMS = [
     'brake', 'filter', 'oil', 'spark plug', 'suspension', 'shock', 'headlight',
     'wiper', 'radiator', 'battery', 'clutch', 'bearing', 'Bosch', 'Tata',
-    'Maruti', 'Hyundai', 'Mahindra', 'bumper', 'mirror', 'belt',
+    'Nexon', 'Tigor', 'bumper', 'mirror', 'belt',
   ];
 
   let s = 0;

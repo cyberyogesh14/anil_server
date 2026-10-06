@@ -132,7 +132,10 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
   ok(list1.body.pagination && typeof list1.body.pagination.pages === 'number', 'pagination.pages present');
   eq(list1.body.pagination.page, 1, 'pagination.page echoed');
   eq(list1.body.pagination.limit, 10, 'pagination.limit echoed');
-  const expectedTotal = await Product.countDocuments({ isActive: true });
+  // docs 90/91 are deliberately non-Tata - the catalogue must not serve them; the
+  // count assertions below therefore carry the same `carBrand: 'Tata'` predicate
+  // that `getProducts` pins.
+  const expectedTotal = await Product.countDocuments({ isActive: true, carBrand: 'Tata' });
   eq(list1.body.pagination.total, expectedTotal, 'total matches countDocuments');
   eq(list1.body.pagination.pages, Math.ceil(expectedTotal / 10), 'pages computed');
 
@@ -145,7 +148,7 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
   const FIELDS = ['name', 'sku', 'partNumber', 'brand', 'carModel', 'carBrand', 'description'];
   for (const q of ['brake', 'Bosch', 'filter', 'oil', 'spark plug', 'Bosch Brake Pad 1', 'SKU-1', 'PN-1', 'Nexon', 'brak']) {
     const re = new RegExp(escapeRegex(q), 'i');
-    const want = await Product.find({ isActive: true, $or: FIELDS.map((f) => ({ [f]: re })) })
+    const want = await Product.find({ isActive: true, carBrand: 'Tata', $or: FIELDS.map((f) => ({ [f]: re })) })
       .populate('category', 'name slug').sort({ createdAt: -1 }).limit(20).lean();
     const got = (await j(`/products/search?q=${encodeURIComponent(q)}&limit=20`)).body.data || [];
     const a = want.map((d) => String(d._id)).sort();
@@ -253,7 +256,7 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
   eq(p99.body.data.length, 0, 'page beyond the end returns no rows');
   ok(p99.body.pagination.pages > 0, 'pages still reported past the end');
   const catFiltered = await j(`/products?category=${cats[0]._id}&limit=50`);
-  const wantCat = await Product.countDocuments({ isActive: true, category: cats[0]._id });
+  const wantCat = await Product.countDocuments({ isActive: true, carBrand: 'Tata', category: cats[0]._id });
   eq(catFiltered.body.pagination.total, wantCat, 'filtered total is counted exactly, not cached');
 
   console.log('\n=== 6. order numbers ===');
@@ -400,8 +403,8 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
   // lowStockProducts is a live stock read and is never cached, so it must be
   // exact on the very next request.
   const live = await j('/admin/dashboard', { headers: { Authorization: `Bearer ${adminTok}` } });
-  const liveOutOfStock = await Product.countDocuments({ isActive: true, stock: 0 });
-  const liveLow = await Product.find({ isActive: true, stock: { $gt: 0, $lte: 5 } })
+  const liveOutOfStock = await Product.countDocuments({ isActive: true, carBrand: 'Tata', stock: 0 });
+  const liveLow = await Product.find({ isActive: true, carBrand: 'Tata', stock: { $gt: 0, $lte: 5 } })
     .select('name stock price').sort({ stock: 1 }).limit(10).lean();
   eq(live.body.data.lowStockProducts.length, liveLow.length, 'lowStockProducts is exact and never stale');
   ok(
@@ -413,14 +416,14 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
   // converge once it expires - that is the contract, so it is what is asserted.
   const stale = live.body.data;
   ok(
-    stale.totalProducts !== (await Product.countDocuments({})) || true,
+    stale.totalProducts !== (await Product.countDocuments({ carBrand: 'Tata' })) || true,
     'aggregate counts served (staleness bounded by the 20s TTL)'
   );
   console.log('        waiting out the 20s dashboard cache TTL...');
   await wait(21500);
   const converged = await j('/admin/dashboard', { headers: { Authorization: `Bearer ${adminTok}` } });
-  eq(converged.body.data.totalProducts, await Product.countDocuments({}), 'totalProducts converges after the TTL');
-  eq(converged.body.data.activeProducts, await Product.countDocuments({ isActive: true }), 'activeProducts converges after the TTL');
+  eq(converged.body.data.totalProducts, await Product.countDocuments({ carBrand: 'Tata' }), 'totalProducts converges after the TTL');
+  eq(converged.body.data.activeProducts, await Product.countDocuments({ isActive: true, carBrand: 'Tata' }), 'activeProducts converges after the TTL');
   eq(converged.body.data.totalOrders, await Order.countDocuments({}), 'totalOrders converges after the TTL');
   eq(converged.body.data.outOfStockCount, liveOutOfStock, 'outOfStockCount converges after the TTL');
 

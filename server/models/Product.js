@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const slugify = require('../utils/slugify');
+const { TATA_CAR_BRAND, isTataCarBrand } = require('../utils/tataPolicy');
 
 const productSchema = new mongoose.Schema(
   {
@@ -7,13 +8,44 @@ const productSchema = new mongoose.Schema(
     slug: { type: String, unique: true },
     sku: { type: String, unique: true, sparse: true },
     description: { type: String, default: '' },
+    /**
+     * Part manufacturer / supplier (`Tata-Compatible`, `Bosch`, `Exide`, ...).
+     * NOT the vehicle make - that is `carBrand` below. Kept free-form on purpose
+     * so legitimate part suppliers are not mistaken for vehicle brands.
+     */
     brand: { type: String, default: '' },
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Category',
       required: true,
     },
-    carBrand: { type: String, default: '' },
+    /**
+     * The vehicle the part fits. AnilKabadi is a TATA-only store, so this
+     * defaults to `Tata` and every public read pins it (see
+     * `utils/tataPolicy.js`).
+     *
+     * There is deliberately no schema-level `enum` rejecting another make: a
+     * legacy row must still be soft-deletable through `product.save()`, and a
+     * validator that threw on save would turn "remove this old Maruti row" into
+     * a 500. Write-side enforcement lives in the product controller (which
+     * rejects non-Tata writes with a 400) and read-side enforcement lives in
+     * every query.
+     */
+    carBrand: {
+      type: String,
+      trim: true,
+      default: TATA_CAR_BRAND,
+      // Canonicalises `TATA` / `tata motors` to `Tata` so an alias can never
+      // hide a row from the pinned `carBrand: 'Tata'` read queries. Anything
+      // else - including an empty string, which means "not classified yet" - is
+      // stored untouched: the controller rejects it before it gets this far, and
+      // the audit script needs to see legacy values as they really are.
+      set: (value) => {
+        if (value === undefined || value === null) return value;
+        const trimmed = String(value).trim();
+        return isTataCarBrand(trimmed) ? TATA_CAR_BRAND : trimmed;
+      },
+    },
     carModel: { type: String, default: '' },
     compatibleYears: { type: String, default: '' },
     partNumber: { type: String, default: '' },
@@ -47,6 +79,17 @@ const productSchema = new mongoose.Schema(
 );
 
 productSchema.index({ name: 'text', description: 'text', brand: 'text', sku: 'text', partNumber: 'text', carModel: 'text', carBrand: 'text' });
+/**
+ * Indexes touched by the TATA-only rule.
+ *
+ * Every public product read now carries `carBrand: 'Tata'`. No new index is
+ * added for that: in a Tata-only catalogue `carBrand` is a near-constant
+ * equality, so it works as a residual predicate on top of the existing
+ * `{ isActive: 1, createdAt: -1 }` / `{ isActive: 1, discount: -1 }` / `{ category: 1, isActive: 1, createdAt: -1 }`
+ * indexes without changing which index the planner picks or adding write
+ * amplification. The dedicated `{ carBrand: 1, emissionStandard: 1, createdAt: -1 }`
+ * index below is what serves the Tata BS6 rail.
+ */
 productSchema.index({ carBrand: 1, carModel: 1 });
 productSchema.index({ emissionStandard: 1 });
 productSchema.index({ brand: 1 });

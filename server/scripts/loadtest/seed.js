@@ -91,18 +91,14 @@ const CATEGORIES = [
   ['Tools & Service', 'tools-service', 'Hand tools, jacks and service kits'],
 ];
 
-const CAR_BRANDS = ['Tata', 'Maruti', 'Hyundai', 'Mahindra', 'Honda', 'Toyota', 'Renault', 'Kia'];
+// TATA-only catalogue: every seeded vehicle is a Tata, matching the read-side
+// policy (`tataOnlyFilter`), so the load test exercises the same data shape the
+// store serves in production.
+const CAR_BRANDS = ['Tata'];
 const CAR_MODELS = {
-  Tata: ['Nexon', 'Punch', 'Altroz', 'Tiago', 'Harrier'],
-  Maruti: ['Swift', 'Baleno', 'Brezza', 'Wagon R', 'Ertiga'],
-  Hyundai: ['i20', 'Creta', 'Venue', 'Grand i10', 'Verna'],
-  Mahindra: ['XUV700', 'Scorpio', 'Thar', 'Bolero', 'Verito'],
-  Honda: ['City', 'Amaze', 'Jazz', 'Elevator'],
-  Toyota: ['Innova', 'Glanza', 'Etios', 'Fortuner'],
-  Renault: ['Kwid', 'Duster', 'Triber'],
-  Kia: ['Seltos', 'Sonet', ' Carnival'],
+  Tata: ['Nexon', 'Punch', 'Altroz', 'Tiago', 'Harrier', 'Safari', 'Curvv', 'Tigor', 'Ace', 'Intra'],
 };
-const BRANDS = ['Bosch', 'Mahindra Original', 'Valeo', 'Denso', 'NGK', 'Exide', 'Amaron', 'Minda'];
+const BRANDS = ['Bosch', 'Tata OEM', 'Valeo', 'Denso', 'NGK', 'Exide', 'Amaron', 'Minda'];
 const PARTS = [
   'Brake Pad Set', 'Oil Filter', 'Air Filter', 'Spark Plug', 'Shock Absorber', 'Clutch Kit',
   'Radiator', 'Water Pump', 'Battery', 'Wiper Blade', 'Side Mirror', 'Headlight Bulb',

@@ -3,17 +3,27 @@ const APIFeatures = require('../utils/apiFeatures');
 const cache = require('../utils/simpleCache');
 const { escapeRegex } = require('../utils/safeRegex');
 const { buildProductSearchFilter } = require('../utils/productSearch');
+const {
+  TATA_CAR_BRAND,
+  validateProductBrandFields,
+  tataOnlyFilter,
+} = require('../utils/tataPolicy');
 
 /**
- * Fields a public catalogue request is allowed to filter on. Anything else in the
- * query string is ignored, and operator-shaped parameters are rejected by
+ * Fields a public catalogue request is allowed to filter on. Anything else in
+ * the query string is ignored, and operator-shaped parameters are rejected by
  * `assertSafeQuery` before MongoDB ever sees them (audit finding F-01).
  * `isActive` is deliberately absent: the routes below decide visibility themselves.
+ *
+ * `carBrand` is absent because the catalogue is TATA-only: the vehicle brand is
+ * not a shopper-selectable dimension. Every query below pins
+ * `carBrand: 'Tata'` itself (`tataOnlyFilter`), so `?carBrand=Maruti` is
+ * ignored rather than trusted - it can neither widen the result set nor be used
+ * to probe for rows outside the policy.
  */
 const PUBLIC_FILTER_KEYS = [
   'category',
   'brand',
-  'carBrand',
   'carModel',
   'condition',
   'emissionStandard',
@@ -89,7 +99,15 @@ const { CATALOGUE_TOTAL_KEY, invalidateCatalogueCache } = require('../utils/cata
  */
 const CATALOGUE_TOTAL_TTL_MS = 30 * 1000;
 
-/** Cache key for `countDocuments({ isActive: true })`. */
+/** Cache key for `countDocuments({ isActive: true, carBrand: 'Tata' })`. */
+
+/**
+ * The filter every public catalogue read is built on.
+ *
+ * `isActive` decides visibility, `carBrand` enforces the TATA-only business
+ * rule. Nothing in this controller reads products without both.
+ */
+const BASE_CATALOGUE_FILTER = tataOnlyFilter({ isActive: true });
 
 exports.getProducts = async (req, res, next) => {
   try {
@@ -97,7 +115,7 @@ exports.getProducts = async (req, res, next) => {
     // `category: { name, slug }` subdocument in each response is unchanged.
     // `.lean()` is then safe: nothing here is saved or passed to a Mongoose
     // method, and a lean populated document serialises identically.
-    const baseQuery = Product.find({ isActive: true }).populate(
+    const baseQuery = Product.find({ ...BASE_CATALOGUE_FILTER }).populate(
       'category',
       'name slug'
     );
@@ -121,16 +139,15 @@ exports.getProducts = async (req, res, next) => {
      *
      * The unfiltered total is also the one count that repeats identically on
      * every page view, and it measured ~1 ms against a ~2.9 ms page query, so
-     * that single case is reused for 30 s. Only the exact filter
-     * `{ isActive: true }` qualifies; anything the shopper actually filtered on
-     * is still counted exactly, because a filtered count is neither repetitive
-     * nor cheap to key safely.
+     * that single case is reused for 30 s. Only a request that applied no
+     * shopper-chosen predicate qualifies; anything the shopper actually filtered
+     * on is still counted exactly, because a filtered count is neither
+     * repetitive nor cheap to key safely. `carBrand` is part of the base filter
+     * rather than a shopper predicate, so it does not disqualify the cache.
      */
-    const totalFilter = {
-      isActive: true,
-      ...(features.dbFilter || {}),
-    };
-    const isUnfilteredTotal = Object.keys(totalFilter).length === 1;
+    const dbFilter = features.dbFilter || {};
+    const totalFilter = { ...BASE_CATALOGUE_FILTER, ...dbFilter };
+    const isUnfilteredTotal = Object.keys(dbFilter).length === 0;
 
     const totalPromise = isUnfilteredTotal
       ? Promise.resolve().then(async () => {
@@ -173,6 +190,12 @@ exports.getProducts = async (req, res, next) => {
  * exist - a hidden product must not be distinguishable from a missing one. Staff and
  * admins may still read one, because the admin product detail and edit screens fetch
  * through this same endpoint and need to see the unpublished item.
+ *
+ * TATA-only rule: a product that is not a Tata vehicle part is answered with the
+ * same 404, for every caller including staff. It is not a listing concern - a
+ * non-Tata row simply does not exist in this catalogue - so a guessed id, a
+ * stale bookmark or a direct API call can never reach one. The audit /
+ * migration scripts are the sanctioned way to inspect or remove such rows.
  */
 exports.getProductById = async (req, res, next) => {
   try {
@@ -180,7 +203,7 @@ exports.getProductById = async (req, res, next) => {
       .populate('category', 'name slug')
       .lean();
 
-    if (!product) {
+    if (!product || product.carBrand !== TATA_CAR_BRAND) {
       return res.status(404).json({
         success: false,
         message: 'Product not found',
@@ -210,10 +233,9 @@ exports.getProductById = async (req, res, next) => {
 
 exports.getProductBySlug = async (req, res, next) => {
   try {
-    const product = await Product.findOne({
-      slug: req.params.slug,
-      isActive: true,
-    })
+    const product = await Product.findOne(
+      tataOnlyFilter({ slug: req.params.slug, isActive: true })
+    )
       .populate('category', 'name slug')
       .lean();
 
@@ -258,6 +280,32 @@ exports.createProduct = async (req, res, next) => {
       return res.status(400).json({
         success: false,
         message: 'Name, price, mrp and category are required',
+      });
+    }
+
+    /**
+     * TATA-only rule, write side.
+     *
+     * Checked before anything expensive happens - a rejected payload must never
+     * reach Cloudinary. `carBrand` has to be a Tata spelling (or empty, which
+     * becomes `Tata`), and `brand` / `carModel` / `name` / `description` may not
+     * name another make. `brand` is the part supplier, so `Tata-Compatible`,
+     * `Bosch` and `Exide` all pass.
+     *
+     * The message uses the project's `{ success, message }` body and a 400,
+     * matching the validation above.
+     */
+    const brandCheck = validateProductBrandFields({
+      carBrand,
+      brand,
+      carModel,
+      name,
+      description,
+    });
+    if (!brandCheck.ok) {
+      return res.status(400).json({
+        success: false,
+        message: brandCheck.message,
       });
     }
 
@@ -321,7 +369,7 @@ exports.createProduct = async (req, res, next) => {
       description: description || '',
       brand: brand || '',
       category,
-      carBrand: carBrand || '',
+      carBrand: brandCheck.carBrand,
       carModel: carModel || '',
       compatibleYears: compatibleYears || '',
       partNumber: partNumber || '',
@@ -405,6 +453,40 @@ exports.updateProduct = async (req, res, next) => {
     const allowedFields =
       req.user.role === 'admin' ? ADMIN_PRODUCT_FIELDS : STAFF_PRODUCT_FIELDS;
     const updateData = pickAllowed(req.body, allowedFields);
+
+    /**
+     * TATA-only rule, write side (same check as `createProduct`).
+     *
+     * Validated against the *result* of the update, not just the submitted
+     * fields, so a partial edit cannot leave a non-Tata value behind that was
+     * already stored. A rejected edit changes nothing.
+     */
+    const brandCheck = validateProductBrandFields({
+      carBrand: Object.prototype.hasOwnProperty.call(updateData, 'carBrand')
+        ? updateData.carBrand
+        : product.carBrand,
+      brand: Object.prototype.hasOwnProperty.call(updateData, 'brand')
+        ? updateData.brand
+        : product.brand,
+      carModel: Object.prototype.hasOwnProperty.call(updateData, 'carModel')
+        ? updateData.carModel
+        : product.carModel,
+      name: Object.prototype.hasOwnProperty.call(updateData, 'name')
+        ? updateData.name
+        : product.name,
+      description: Object.prototype.hasOwnProperty.call(updateData, 'description')
+        ? updateData.description
+        : product.description,
+    });
+    if (!brandCheck.ok) {
+      return res.status(400).json({
+        success: false,
+        message: brandCheck.message,
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, 'carBrand')) {
+      updateData.carBrand = brandCheck.carBrand;
+    }
 
     let baseImages = product.images || [];
     if (updateData.existingImages) {
@@ -521,10 +603,7 @@ exports.getFeaturedProducts = async (req, res, next) => {
         data: cached,
       });
     }
-    const products = await Product.find({
-      isActive: true,
-      featured: true,
-    })
+    const products = await Product.find(tataOnlyFilter({ isActive: true, featured: true }))
       .populate('category', 'name slug')
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -550,11 +629,9 @@ exports.getTataBS6Products = async (req, res, next) => {
         data: cached,
       });
     }
-    const products = await Product.find({
-      isActive: true,
-      carBrand: 'Tata',
-      emissionStandard: 'BS6',
-    })
+    const products = await Product.find(
+      tataOnlyFilter({ isActive: true, emissionStandard: 'BS6' })
+    )
       .populate('category', 'name slug')
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -613,10 +690,9 @@ exports.getProductsByCondition = async (req, res, next) => {
       });
     }
 
-    const products = await Product.find({
-      isActive: true,
-      condition: conditionFilter,
-    })
+    const products = await Product.find(
+      tataOnlyFilter({ isActive: true, condition: conditionFilter })
+    )
       .populate('category', 'name slug')
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -644,10 +720,9 @@ exports.getBestDeals = async (req, res, next) => {
         data: cached,
       });
     }
-    const products = await Product.find({
-      isActive: true,
-      discount: { $gt: 0 },
-    })
+    const products = await Product.find(
+      tataOnlyFilter({ isActive: true, discount: { $gt: 0 } })
+    )
       .populate('category', 'name slug')
       .sort({ discount: -1 })
       .limit(limit)
@@ -665,7 +740,7 @@ exports.getBestDeals = async (req, res, next) => {
 exports.searchProducts = async (req, res, next) => {
   try {
     const { q } = req.query;
-    const baseQuery = Product.find({ isActive: true }).populate(
+    const baseQuery = Product.find(tataOnlyFilter({ isActive: true })).populate(
       'category',
       'name slug'
     );
@@ -719,10 +794,10 @@ exports.getProductsByCategory = async (req, res, next) => {
     const limit = Math.min(50, parseInt(req.query.limit, 10) || 20);
     const skip = (page - 1) * limit;
 
-    const filter = {
+    const filter = tataOnlyFilter({
       category: req.params.categoryId,
       isActive: true,
-    };
+    });
 
     // Page and count are independent reads; issuing them together removes one
     // full round trip from the request.

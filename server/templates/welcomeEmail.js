@@ -16,7 +16,7 @@ const welcomeEmail = ({ name, marketingConsent = false }) => {
         <strong>Tata BS6 Parts at Low Prices</strong>
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        Wide range of parts for Tata, Hyundai, Maruti &amp; Mahindra vehicles.
+        Wide range of parts for Tata vehicles - new, used and refurbished.
       </p>
     </div>
     <p style="${styles.p}">

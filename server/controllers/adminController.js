@@ -11,6 +11,7 @@ const { getSettings } = require('./settingsController');
 const { assertSafeQuery } = require('../utils/safeQuery');
 const { escapeRegex } = require('../utils/safeRegex');
 const cache = require('../utils/simpleCache');
+const { tataOnlyFilter } = require('../utils/tataPolicy');
 
 /**
  * Order states the admin list may be filtered by. Hard-coded rather than derived
@@ -77,6 +78,12 @@ exports.getDashboard = async (req, res, next) => {
       await Promise.all([
         cachedAggregates ? Promise.resolve(cachedAggregates.productStats) : Product.aggregate([
           {
+            // TATA-only rule: every product stat counts the Tata catalogue only.
+            // A non-Tata row is not "in the catalogue", so it must not inflate
+            // total / active / out-of-stock figures.
+            $match: tataOnlyFilter(),
+          },
+          {
             $group: {
               _id: null,
               totalProducts: { $sum: 1 },
@@ -116,7 +123,7 @@ exports.getDashboard = async (req, res, next) => {
             },
           },
         ]),
-        Product.find({ isActive: true, stock: { $gt: 0, $lte: 5 } })
+        Product.find(tataOnlyFilter({ isActive: true, stock: { $gt: 0, $lte: 5 } }))
           .select('name stock price')
           .sort({ stock: 1 })
           .limit(10)
@@ -190,9 +197,12 @@ exports.getDashboard = async (req, res, next) => {
       adminAggregates = { totalUsers, salesData, topProducts };
 
       const topProductIds = topProducts.map((p) => p._id);
-      const productDocs = await Product.find({
+      // TATA-only rule: a sold item that is no longer a Tata part provides the
+      // historical revenue but has no current product record, so the lookup
+      // simply finds nothing and the row is dropped from the leaderboard.
+      const productDocs = await Product.find(tataOnlyFilter({
         _id: { $in: topProductIds },
-      })
+      }))
         .select('name price images')
         .lean();
       const productMap = new Map(productDocs.map((p) => [p._id.toString(), p]));

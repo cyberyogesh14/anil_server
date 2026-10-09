@@ -1,3 +1,4 @@
+
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
@@ -33,48 +34,54 @@ const settingsRoutes = require('./routes/settingsRoutes');
 
 const app = express();
 
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-
+// Security headers
 app.use(
-  cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    credentials: true,
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
   })
 );
 
-/**
- * Request logging.
- *
- * Moved into `middleware/requestLogger.js`, which is aware of the worker id and
- * of the health endpoints, and keeps access logs off the hot path in production
- * unless LOG_REQUESTS is set. The previous behaviour - a line per request in
- * production, plus a line for every health probe - is covered by that module's
- * comments.
- */
+// CORS: return exactly one matching origin per request.
+const allowedOrigins = (
+  process.env.CLIENT_URL ||
+  'http://localhost:5173'
+)
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Requests without an Origin header (e.g. server-to-server).
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      const normalizedOrigin = origin.trim().replace(/\/+$/, '');
+
+      if (allowedOrigins.includes(normalizedOrigin)) {
+        return callback(null, true);
+      }
+
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      return callback(new Error('Origin not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    optionsSuccessStatus: 204,
+  })
+);
+
+// Request logging
 const requestLogger = buildLogger();
 if (requestLogger) app.use(requestLogger);
 
-/**
- * Razorpay webhook - MUST be registered before express.json().
- * The signature is an HMAC of the exact request bytes, so the payload has to
- * reach the handler untouched. express.raw() on this router captures the raw
- * buffer; JSON parsing anywhere earlier would destroy it.
- *
- * This stays above the body parsers no matter how the limits below are tuned -
- * moving it would break webhook signature verification.
- */
+// Razorpay webhook must be registered before express.json()
 app.use('/api/payments/razorpay', paymentRoutes.webhookRouter);
 
-/**
- * Body size limits.
- *
- * Both parsers previously accepted 10 MB on every route, so a single request
- * could make the process buffer 10 MB of JSON before validation ever ran. The
- * largest legitimate payload is an email campaign's HTML body, which is orders of
- * magnitude smaller than this; product and category images go through `multer`
- * as multipart and are unaffected. Overridable per deployment via
- * `JSON_BODY_LIMIT` / `URLENCODED_BODY_LIMIT`.
- */
+// Body size limits
 const jsonLimit = process.env.JSON_BODY_LIMIT || '1mb';
 const urlencodedLimit = process.env.URLENCODED_BODY_LIMIT || '1mb';
 
@@ -84,24 +91,15 @@ app.use(cookieParser());
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-/**
- * Monitoring endpoints, registered BEFORE the rate limiter.
- *
- * A load balancer polling every few seconds must never be answered with a 429
- * because real users are being throttled, and these endpoints are how the
- * balancer decides whether to send traffic here at all. Both the `/api`-prefixed
- * and bare paths are served, so Nginx can use either.
- *
- * `/api/health` keeps its exact previous response shape plus extra fields, so any
- * existing monitor asserting on `success` or `message` is unaffected.
- */
+// Health and monitoring endpoints
 app.get(['/api/health', '/health'], healthController.health);
 app.get(['/api/ready', '/ready'], healthController.ready);
 app.get(['/api/diagnostics', '/diagnostics'], healthController.diagnostics);
 
-// Everything below this line is subject to rate limiting.
+// Rate limiting
 app.use('/api', apiLimiter);
 
+// API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/categories', categoryRoutes);
@@ -115,6 +113,7 @@ app.use('/api/email', emailRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api', reviewRoutes);
 
+// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -122,36 +121,27 @@ app.use('*', (req, res) => {
   });
 });
 
+// Error handler
 app.use(errorHandler);
 
 const PORT = config.port;
-
-/** The live HTTP server, kept so shutdown can stop accepting connections. */
 let server = null;
-
-/** True once SIGTERM/SIGINT has arrived. Health reports not-ready during drain. */
 let shuttingDown = false;
 
 const startServer = async () => {
-  /**
-   * Refuse to start on an unsafe configuration rather than serving traffic with
-   * it. A missing JWT secret or an unreachable Redis in production is a security
-   * or correctness problem that should be a loud boot failure, not a surprise
-   * discovered later.
-   */
   const { problems, warnings } = validate();
+
   if (problems.length) {
     console.error('[config] refusing to start:');
-    problems.forEach((p) => console.error(`  - ${p}`));
+    problems.forEach((problem) => console.error(`  - ${problem}`));
     process.exit(1);
   }
+
   if (warnings.length) {
     console.warn('[config] warnings:');
-    warnings.forEach((w) => console.warn(`  - ${w}`));
+    warnings.forEach((warning) => console.warn(`  - ${warning}`));
   }
 
-  // Log the resolved configuration (redacted) before connecting, so a boot log
-  // records which worker count and pool size the process actually came up with.
   console.log(`[config] ${workerTag()} ${JSON.stringify(describe())}`);
 
   await connectDB();
@@ -160,43 +150,25 @@ const startServer = async () => {
   configureRazorpay();
 
   server = app.listen(PORT, () => {
-    // The load-test harness waits for this exact string.
     console.log(`AnilKabadi server running on port ${PORT}`);
-    console.log(`[boot] ${workerTag()} ready (pid ${process.pid}, ${config.instances} worker(s) expected)`);
+    console.log(
+      `[boot] ${workerTag()} ready (pid ${process.pid}, ${config.instances} worker(s) expected)`
+    );
   });
 
-  // Under PM2 cluster mode every worker shares one port and the OS load-balances
-  // the connections between them. Binding explicitly to all interfaces would be
-  // wrong here; `listen(port)` without a host already binds 0.0.0.0.
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
 };
 
-/**
- * Graceful shutdown.
- *
- * The sequence matters and is the whole point:
- *
- *   1. `/ready` starts reporting 503, so Nginx and any load balancer stop sending
- *      new requests here. This is what makes a reload invisible rather than a
- *      burst of connection errors.
- *   2. `server.close()` stops accepting NEW connections. Existing keep-alive
- *      connections are still served.
- *   3. Keep-alive sockets are closed once idle, so a client holding a connection
- *      open does not hold shutdown open indefinitely.
- *   4. Wait for in-flight requests to finish, bounded by SHUTDOWN_TIMEOUT_MS so a
- *      stuck request cannot block a deploy forever.
- *   5. Close MongoDB and Redis so no handle keeps the process alive.
- *
- * Without step 1 a reload drops requests that Nginx was mid-way through sending.
- * Without step 4 the process can be killed mid-checkout.
- */
 const SHUTDOWN_TIMEOUT_MS = config.shutdownTimeoutMs;
 
 const shutdown = async (signal) => {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[shutdown] ${signal} received by ${workerTag()} (pid ${process.pid})`);
+
+  console.log(
+    `[shutdown] ${signal} received by ${workerTag()} (pid ${process.pid})`
+  );
 
   const forceExit = setTimeout(() => {
     console.error(
@@ -204,14 +176,14 @@ const shutdown = async (signal) => {
     );
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
+
   forceExit.unref();
 
   try {
     if (server) {
       await new Promise((resolve) => {
         server.close(resolve);
-        // Let in-flight requests finish, but do not wait forever for idle
-        // keep-alive sockets to be reaped on their own.
+
         if (typeof server.closeIdleConnections === 'function') {
           server.closeIdleConnections();
         }
@@ -225,7 +197,9 @@ const shutdown = async (signal) => {
     await redisClient.quit();
     console.log(`[shutdown] ${workerTag()} Redis connection closed`);
   } catch (error) {
-    console.error(`[shutdown] ${workerTag()} error during shutdown: ${error.message}`);
+    console.error(
+      `[shutdown] ${workerTag()} error during shutdown: ${error.message}`
+    );
   } finally {
     clearTimeout(forceExit);
     console.log(`[shutdown] ${workerTag()} exiting`);
@@ -236,14 +210,19 @@ const shutdown = async (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// A crash in one worker must not take the process down silently. PM2 restarts the
-// process and restarts are logged with the worker id so the cause is traceable.
 process.on('uncaughtException', (error) => {
-  console.error(`[${workerTag()}] uncaughtException: ${error && error.stack ? error.stack : error}`);
+  console.error(
+    `[${workerTag()}] uncaughtException: ${
+      error && error.stack ? error.stack : error
+    }`
+  );
 });
+
 process.on('unhandledRejection', (reason) => {
   console.error(
-    `[${workerTag()}] unhandledRejection: ${reason && reason.stack ? reason.stack : reason}`
+    `[${workerTag()}] unhandledRejection: ${
+      reason && reason.stack ? reason.stack : reason
+    }`
   );
 });
 

@@ -1,5 +1,6 @@
 const Category = require('../models/Category');
 const { escapeRegex } = require('../utils/safeRegex');
+const { sanitizeSeoFields } = require('../utils/seoText');
 const cache = require('../utils/simpleCache');
 const { CATEGORIES_KEY } = require('../utils/catalogueCache');
 
@@ -48,6 +49,7 @@ exports.getCategoryById = async (req, res, next) => {
 exports.createCategory = async (req, res, next) => {
   try {
     const { name, description } = req.body;
+    const seoFields = sanitizeSeoFields(req.body);
 
     if (!name) {
       return res.status(400).json({
@@ -95,6 +97,7 @@ const existing = await Category.findOne({
       name,
       description: description || '',
       image,
+      ...seoFields,
     });
 
     await cache.del(CATEGORIES_KEY);
@@ -122,6 +125,8 @@ const CATEGORY_EDITABLE_FIELDS = [
   'description',
   'slug',
   'image',
+  'seoTitle',
+  'seoDescription',
 ];
 
 exports.updateCategory = async (req, res, next) => {
@@ -132,6 +137,10 @@ exports.updateCategory = async (req, res, next) => {
         updateData[key] = req.body[key];
       }
     }
+    // Strip markup / clamp length from any SEO override that was submitted;
+    // keys that were not submitted are absent from the result and therefore
+    // left untouched on the stored document.
+    Object.assign(updateData, sanitizeSeoFields(updateData));
 
     if (req.user.role === 'admin' && typeof req.body.isActive === 'boolean') {
       updateData.isActive = req.body.isActive;

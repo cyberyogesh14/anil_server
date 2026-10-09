@@ -225,7 +225,15 @@ const reject = (message) => ({ ok: false, message });
  *   name          may not name another make
  *   description   may not name another make
  */
-const validateProductBrandFields = ({ carBrand, brand, carModel, name, description } = {}) => {
+const validateProductBrandFields = ({
+  carBrand,
+  brand,
+  carModel,
+  name,
+  description,
+  seoTitle,
+  seoDescription,
+} = {}) => {
   if (carBrand !== undefined && carBrand !== null && String(carBrand).trim() !== '') {
     if (!isTataCarBrand(carBrand)) {
       return reject(
@@ -257,6 +265,22 @@ const validateProductBrandFields = ({ carBrand, brand, carModel, name, descripti
   if (findNonTataVehicleBrandToken(description, FREE_TEXT_MIN_TOKEN_LENGTH)) {
     return reject(
       'Product description must not reference a non-Tata vehicle. AnilKabadi stocks Tata parts only.'
+    );
+  }
+
+  // The optional SEO overrides are free text a staff member types directly
+  // into the search listing, so they get the same free-text check as
+  // `name` / `description` — otherwise "Toyota Hilux brake pads" could be
+  // smuggled past the product fields into the SERP snippet.
+  if (findNonTataVehicleBrandToken(seoTitle, FREE_TEXT_MIN_TOKEN_LENGTH)) {
+    return reject(
+      'SEO title must not reference a non-Tata vehicle. AnilKabadi stocks Tata parts only.'
+    );
+  }
+
+  if (findNonTataVehicleBrandToken(seoDescription, FREE_TEXT_MIN_TOKEN_LENGTH)) {
+    return reject(
+      'SEO description must not reference a non-Tata vehicle. AnilKabadi stocks Tata parts only.'
     );
   }
 

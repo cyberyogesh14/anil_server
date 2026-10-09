@@ -9,6 +9,18 @@ const productSchema = new mongoose.Schema(
     sku: { type: String, unique: true, sparse: true },
     description: { type: String, default: '' },
     /**
+     * Optional search-engine metadata an admin can override per product.
+     *
+     * Empty by default: when these are blank the storefront derives the
+     * `<title>` / meta description from the real product fields
+     * (client/src/pages/ProductDetails.jsx), so they are only ever a manual
+     * override — they can never introduce claims the listing does not back up.
+     * Lengths are clamped by utils/seoText.js on write as well, so an
+     * over-long value is trimmed instead of rejected.
+     */
+    seoTitle: { type: String, default: '', trim: true, maxlength: 200 },
+    seoDescription: { type: String, default: '', trim: true, maxlength: 500 },
+    /**
      * Part manufacturer / supplier (`Tata-Compatible`, `Bosch`, `Exide`, ...).
      * NOT the vehicle make - that is `carBrand` below. Kept free-form on purpose
      * so legitimate part suppliers are not mistaken for vehicle brands.

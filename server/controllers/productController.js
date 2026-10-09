@@ -8,6 +8,7 @@ const {
   validateProductBrandFields,
   tataOnlyFilter,
 } = require('../utils/tataPolicy');
+const { sanitizeSeoFields } = require('../utils/seoText');
 
 /**
  * Fields a public catalogue request is allowed to filter on. Anything else in
@@ -58,6 +59,8 @@ const PUBLIC_FIELD_KEYS = [
   'isActive',
   'rating',
   'numReviews',
+  'seoTitle',
+  'seoDescription',
   'specifications',
   'createdAt',
   'updatedAt',
@@ -274,7 +277,14 @@ exports.createProduct = async (req, res, next) => {
       sku,
       featured,
       specifications,
+      seoTitle,
+      seoDescription,
     } = req.body;
+
+    // Tags stripped and lengths clamped BEFORE validation, so the brand check
+    // sees exactly what will be stored (no check/store mismatch) and an
+    // over-long paste is trimmed rather than rejected.
+    const seoFields = sanitizeSeoFields({ seoTitle, seoDescription });
 
     if (!name || !price || !mrp || !category) {
       return res.status(400).json({
@@ -301,6 +311,8 @@ exports.createProduct = async (req, res, next) => {
       carModel,
       name,
       description,
+      seoTitle: seoFields.seoTitle,
+      seoDescription: seoFields.seoDescription,
     });
     if (!brandCheck.ok) {
       return res.status(400).json({
@@ -381,6 +393,7 @@ exports.createProduct = async (req, res, next) => {
       images,
       featured: featured === 'true' || featured === true,
       specifications: parsedSpecs,
+      ...seoFields,
     });
 
     // Invalidate the cached rails before responding. A newly created product can
@@ -421,6 +434,8 @@ const STAFF_PRODUCT_FIELDS = [
   'stock',
   'featured',
   'specifications',
+  'seoTitle',
+  'seoDescription',
 ];
 
 /** Admins additionally control SKU, images and the publish flag. */
@@ -454,6 +469,11 @@ exports.updateProduct = async (req, res, next) => {
       req.user.role === 'admin' ? ADMIN_PRODUCT_FIELDS : STAFF_PRODUCT_FIELDS;
     const updateData = pickAllowed(req.body, allowedFields);
 
+    // Sanitised in place after the allow-list pick: `?fields`-style body keys
+    // never reach this point, and an absent key is left out entirely so a
+    // partial edit cannot blank the stored value of the other SEO field.
+    Object.assign(updateData, sanitizeSeoFields(updateData));
+
     /**
      * TATA-only rule, write side (same check as `createProduct`).
      *
@@ -477,6 +497,15 @@ exports.updateProduct = async (req, res, next) => {
       description: Object.prototype.hasOwnProperty.call(updateData, 'description')
         ? updateData.description
         : product.description,
+      seoTitle: Object.prototype.hasOwnProperty.call(updateData, 'seoTitle')
+        ? updateData.seoTitle
+        : product.seoTitle,
+      seoDescription: Object.prototype.hasOwnProperty.call(
+        updateData,
+        'seoDescription'
+      )
+        ? updateData.seoDescription
+        : product.seoDescription,
     });
     if (!brandCheck.ok) {
       return res.status(400).json({

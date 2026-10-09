@@ -53,7 +53,6 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Requests without an Origin header (e.g. server-to-server).
       if (!origin) {
         return callback(null, true);
       }
@@ -212,16 +211,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('uncaughtException', (error) => {
   console.error(
-    `[${workerTag()}] uncaughtException: ${
-      error && error.stack ? error.stack : error
+    `[${workerTag()}] uncaughtException: ${error && error.stack ? error.stack : error
     }`
   );
 });
 
 process.on('unhandledRejection', (reason) => {
   console.error(
-    `[${workerTag()}] unhandledRejection: ${
-      reason && reason.stack ? reason.stack : reason
+    `[${workerTag()}] unhandledRejection: ${reason && reason.stack ? reason.stack : reason
     }`
   );
 });

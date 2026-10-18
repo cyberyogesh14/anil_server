@@ -3,7 +3,7 @@ const Product = require('../models/Product');
 
 /** The product shape a wishlist entry exposes. */
 const WISHLIST_PRODUCT_FIELDS =
-  'name slug price mrp discount stock images isActive condition';
+  'name slug price mrp discount stock images isActive condition partNumber';
 
 exports.getWishlist = async (req, res, next) => {
   try {

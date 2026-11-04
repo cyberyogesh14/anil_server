@@ -4,10 +4,13 @@ const {
   getKeyId,
   getKeySecret,
   getWebhookSecret,
+  getKeyMode,
+  getKeyIdHint,
   isConfigured,
 } = require('../config/razorpay');
 
 const MAX_AMOUNT_PAISE = 100 * 100 * 100 * 100;
+const MIN_AMOUNT_PAISE = 100;
 
 /**
  * Constant-time string comparison. `timingSafeEqual` throws when buffer
@@ -29,16 +32,68 @@ const safeCompare = (a = '', b = '') => {
 const hmacSha256 = (secret, payload) =>
   crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
+const amountError = (message) => {
+  const error = new Error(message);
+  error.code = 'INVALID_PAYMENT_AMOUNT';
+  error.statusCode = 400;
+  return error;
+};
+
 /** Converts a rupee amount (possibly fractional) into integer INR paise. */
 const toPaise = (amountInRupees) => {
-  const paise = Math.round(Number(amountInRupees) * 100);
-  if (!Number.isFinite(paise) || paise <= 0) {
-    throw new Error('Payment amount must be a positive value');
+  const amount = Number(amountInRupees);
+  const paise = Math.round(amount * 100);
+
+  if (!Number.isFinite(amount) || !Number.isFinite(paise) || paise < MIN_AMOUNT_PAISE) {
+    throw amountError('Payment amount must be at least INR 1.00');
+  }
+  if (!Number.isSafeInteger(paise)) {
+    throw amountError('Payment amount must be a whole number of paise');
   }
   if (paise > MAX_AMOUNT_PAISE) {
-    throw new Error('Payment amount is too large');
+    throw amountError('Payment amount is too large');
   }
   return paise;
+};
+
+const redact = (value) => {
+  let text = String(value || '');
+  const secret = getKeySecret();
+  if (secret) text = text.split(secret).join('[redacted]');
+  return text;
+};
+
+/**
+ * The Razorpay Node SDK rejects with a plain object (`{ statusCode, error }`)
+ * rather than an Error, so a normal `error.message` lookup produces `undefined`
+ * and the controller had no way to tell a credentials problem from a transient
+ * outage. This converts it into a typed Error carrying only the diagnostic
+ * fields that are safe to log.
+ */
+const normalizeRazorpayError = (error) => {
+  const statusCode =
+    Number(error?.statusCode) || Number(error?.response?.status) || 0;
+  const details =
+    error?.error || error?.response?.data?.error || error?.response?.data || {};
+  const description = redact(
+    details.description || error?.message || 'Razorpay request failed'
+  );
+  const code = details.code || error?.code || 'RAZORPAY_ERROR';
+  const isAuthError =
+    statusCode === 401 ||
+    statusCode === 403 ||
+    /authentication failed|invalid api key|unauthorized/i.test(description);
+
+  const normalized = new Error(description);
+  normalized.name = 'RazorpayAPIError';
+  normalized.code = code;
+  normalized.statusCode = statusCode;
+  normalized.razorpayStatus = statusCode;
+  normalized.razorpayReason = details.reason || '';
+  normalized.razorpayField = details.field || '';
+  normalized.isRazorpayError = true;
+  normalized.isAuthError = isAuthError;
+  return normalized;
 };
 
 /**
@@ -49,7 +104,6 @@ const createRazorpayOrder = async ({
   amountInRupees,
   receipt,
   notes = {},
-  expiresAt,
 }) => {
   const razorpay = getRazorpay();
   const amount = toPaise(amountInRupees);
@@ -60,10 +114,6 @@ const createRazorpayOrder = async ({
     receipt: String(receipt).slice(0, 40),
   };
 
-  if (expiresAt) {
-    payload.expires_at = Math.floor(new Date(expiresAt).getTime() / 1000);
-  }
-
   const safeNotes = {};
   for (const [key, value] of Object.entries(notes)) {
     if (value === undefined || value === null || value === '') continue;
@@ -73,15 +123,45 @@ const createRazorpayOrder = async ({
     payload.notes = safeNotes;
   }
 
-  const order = await razorpay.orders.create(payload);
+  try {
+    const order = await razorpay.orders.create(payload);
 
-  return {
-    razorpayOrderId: order.id,
-    amount: order.amount,
-    currency: order.currency,
-    status: order.status,
-    keyId: getKeyId(),
-  };
+    if (!order || !order.id) {
+      const error = new Error('Razorpay returned an order without an id');
+      error.code = 'RAZORPAY_INVALID_RESPONSE';
+      error.statusCode = 502;
+      error.isRazorpayError = true;
+      throw error;
+    }
+
+    return {
+      razorpayOrderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      status: order.status,
+      keyId: getKeyId(),
+    };
+  } catch (error) {
+    const normalized = error.isRazorpayError
+      ? error
+      : normalizeRazorpayError(error);
+
+    // Safe diagnostics only: no key secret, request headers, notes or payment
+    // instrument data are ever logged. The key id is public and abbreviated.
+    const authHint = normalized.isAuthError
+      ? ' Check that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are a matching pair from the same Razorpay mode (test/live); the key may also be expired or revoked.'
+      : '';
+
+    console.error(
+      '[razorpay] orders.create failed ' +
+        `(mode=${getKeyMode()}, key=${getKeyIdHint()}, ` +
+        `httpStatus=${normalized.razorpayStatus || 'n/a'}, ` +
+        `code=${normalized.code}, field=${normalized.razorpayField || 'n/a'}, ` +
+        `amountPaise=${amount}, currency=INR): ${normalized.message}${authHint}`
+    );
+
+    throw normalized;
+  }
 };
 
 /**

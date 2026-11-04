@@ -79,6 +79,7 @@ class FakeRazorpay {
         rzOrders.set(order.id, order);
         return { ...order };
       },
+      all: async () => ({ entity: 'collection', count: 0, items: [] }),
     };
   }
 }

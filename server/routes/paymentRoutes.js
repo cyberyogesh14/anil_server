@@ -3,6 +3,7 @@ const {
   createRazorpayOrder,
   verifyRazorpayPayment,
   handleRazorpayWebhook,
+  getRazorpayStatus,
 } = require('../controllers/paymentController');
 const protect = require('../middleware/authMiddleware');
 const { paymentLimiter } = require('../middleware/rateLimitMiddleware');
@@ -23,6 +24,7 @@ webhookRouter.post(
   handleRazorpayWebhook
 );
 
+router.get('/razorpay/status', paymentLimiter, getRazorpayStatus);
 router.post('/razorpay/create-order', protect, paymentLimiter, createRazorpayOrder);
 router.post('/razorpay/verify', protect, paymentLimiter, verifyRazorpayPayment);
 

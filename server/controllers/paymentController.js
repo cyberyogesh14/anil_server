@@ -10,7 +10,11 @@ const {
   normaliseAddress,
   validateAddress,
 } = require('../services/pricingService');
-const { isConfigured, getKeyId } = require('../config/razorpay');
+const {
+  isConfigured,
+  getKeyId,
+  validateRazorpayCredentials,
+} = require('../config/razorpay');
 const ApiError = require('../services/ApiError');
 
 // A pending online order older than this is treated as abandoned: its stock
@@ -141,6 +145,33 @@ const findReusableOrder = async ({ userId, fingerprint, address }) => {
 };
 
 /**
+ * GET /api/payments/razorpay/status
+ *
+ * Safe availability check for the checkout UI. It never returns the key id or
+ * secret, and only reports `available: true` after the cached authenticated
+ * credential check has succeeded against Razorpay.
+ */
+exports.getRazorpayStatus = async (req, res, next) => {
+  try {
+    const status = await validateRazorpayCredentials();
+
+    res.json({
+      success: true,
+      data: {
+        available: status.available,
+        configured: status.configured,
+        mode: status.mode,
+        state: status.state,
+        checkedAt: status.checkedAt,
+        message: status.message,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * POST /api/payments/razorpay/create-order
  *
  * Recalculates the whole order from MongoDB, creates the internal pending
@@ -150,6 +181,9 @@ const findReusableOrder = async ({ userId, fingerprint, address }) => {
 exports.createRazorpayOrder = async (req, res, next) => {
   try {
     if (!isConfigured()) {
+      console.error(
+        '[razorpay] create-order rejected: RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET is missing'
+      );
       throw new ApiError(
         503,
         'Online payments are not available right now. Please choose Cash on Delivery.'
@@ -164,6 +198,17 @@ exports.createRazorpayOrder = async (req, res, next) => {
     const { orderItems, totals } = await buildOrderFromCart({
       userId: req.user._id,
     });
+
+    // Reject an unpayable total before creating an internal order or reserving
+    // stock. Razorpay requires an integer amount of at least 100 paise.
+    try {
+      razorpayService.toPaise(totals.totalAmount);
+    } catch (error) {
+      if (error.code === 'INVALID_PAYMENT_AMOUNT') {
+        throw new ApiError(400, 'Order amount is invalid. Please review your cart and try again.');
+      }
+      throw error;
+    }
 
     const fingerprint = cartFingerprint(orderItems, totals.totalAmount);
 
@@ -219,24 +264,49 @@ exports.createRazorpayOrder = async (req, res, next) => {
       razorpayOrder = await razorpayService.createRazorpayOrder({
         amountInRupees: order.totalAmount,
         receipt: order.orderNumber,
-        expiresAt: order.paymentExpiresAt,
         notes: {
           internalOrderId: String(order._id),
           orderNumber: order.orderNumber,
         },
       });
     } catch (error) {
-      console.error('Razorpay order creation failed:', error.message);
+      // Roll back a freshly created order and its stock reservation. A reused
+      // pending order stays pending so the customer can retry it.
       if (!reusable) {
-        order.orderStatus = 'cancelled';
-        order.paymentStatus = 'failed';
-        await order.save();
-        await stockService.releaseStock(order);
+        try {
+          order.orderStatus = 'cancelled';
+          order.paymentStatus = 'failed';
+          order.paymentFailedAt = new Date();
+          await order.save();
+          await stockService.releaseStock(order);
+        } catch (rollbackError) {
+          console.error(
+            `[razorpay] rollback failed for order ${order.orderNumber}: ${rollbackError.message}`
+          );
+        }
       }
-      throw new ApiError(
-        502,
-        'Could not start the payment. Please try again in a moment.'
-      );
+
+      if (error.code === 'RAZORPAY_NOT_CONFIGURED' || error.isAuthError) {
+        throw new ApiError(
+          503,
+          'Online payments are temporarily unavailable because the payment gateway is not configured correctly. Please choose Cash on Delivery or contact support.'
+        );
+      }
+
+      if (error.code === 'INVALID_PAYMENT_AMOUNT') {
+        throw new ApiError(400, 'Order amount is invalid. Please review your cart and try again.');
+      }
+
+      if (error.isRazorpayError) {
+        throw new ApiError(
+          502,
+          'The payment gateway could not create this order. Please try again or choose Cash on Delivery.'
+        );
+      }
+
+      // Anything else is an application fault, not a gateway fault: let the
+      // central error handler return 500 instead of disguising it as a 502.
+      throw error;
     }
 
     if (order.razorpayOrderId !== razorpayOrder.razorpayOrderId) {

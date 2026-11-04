@@ -46,6 +46,16 @@ const SERVER_ROOT = path.resolve(__dirname, '..');
 let rzOrderSeq = 0;
 let rzPaymentSeq = 0;
 const rzOrders = new Map();
+let rzCreateFailure = null;
+let rzCredentialCheckFailure = null;
+
+const failNextRazorpayCreate = (failure) => {
+  rzCreateFailure = failure;
+};
+
+const failNextRazorpayCredentialCheck = (failure) => {
+  rzCredentialCheckFailure = failure;
+};
 
 const hmac = (secret, payload) =>
   crypto.createHmac('sha256', secret).update(payload).digest('hex');
@@ -56,6 +66,11 @@ class FakeRazorpay {
     this.key_secret = opts.key_secret;
     this.orders = {
       create: async (payload) => {
+        if (rzCreateFailure) {
+          const failure = rzCreateFailure;
+          rzCreateFailure = null;
+          throw failure;
+        }
         rzOrderSeq += 1;
         const id = `order_test_${rzOrderSeq}`;
         const order = {
@@ -69,6 +84,14 @@ class FakeRazorpay {
         };
         rzOrders.set(id, order);
         return { ...order };
+      },
+      all: async () => {
+        if (rzCredentialCheckFailure) {
+          const failure = rzCredentialCheckFailure;
+          rzCredentialCheckFailure = null;
+          throw failure;
+        }
+        return { entity: 'collection', count: 0, items: [] };
       },
     };
   }
@@ -275,6 +298,16 @@ const main = async () => {
     const res = await api('GET', '/api/health');
     assertEqual(res.status, 200, 'health status');
     assert(res.body.success, 'health body');
+  });
+
+  await check('payment status reports verified Test Mode availability', async () => {
+    const res = await api('GET', '/api/payments/razorpay/status');
+    assertEqual(res.status, 200, 'status endpoint: ' + res.text);
+    assert(res.body.success, 'success flag');
+    assertEqual(res.body.data.available, true, 'available');
+    assertEqual(res.body.data.mode, 'test', 'mode');
+    assertEqual(res.body.data.state, 'verified', 'state');
+    assert(!res.text.includes(process.env.RAZORPAY_KEY_SECRET), 'secret leaked');
   });
 
   await check('create-order is mounted (not 404)', async () => {
@@ -955,6 +988,202 @@ const main = async () => {
     assertEqual(res.status, 400, 'forged signature must be rejected');
     const after = await Order.findById(order._id);
     assertEqual(after.paymentStatus, 'pending', 'not paid');
+  });
+
+  // =======================================================================
+  suite('10. Create-order failure handling');
+
+  await check('invalid amount is rejected before an order or stock is touched', async () => {
+    const originalSettings = await Settings.findOne().lean();
+    await Settings.updateMany(
+      {},
+      { $set: { freeDeliveryThreshold: 0, deliveryFee: 0, gstPercentage: 0 } }
+    );
+
+    try {
+      const zero = await makeProducts([
+        { name: 'Zero Value Part', price: 0, mrp: 0, stock: 3 },
+      ]);
+      await setCart([{ product: zero[0]._id, quantity: 1 }]);
+
+      const before = await Order.countDocuments({});
+      const res = await api('POST', '/api/payments/razorpay/create-order', {
+        token,
+        body: { shippingAddress: ADDRESS },
+      });
+
+      assertEqual(res.status, 400, `expected 400, got ${res.status}: ${res.text}`);
+      assert(/amount is invalid/i.test(res.body.message), `message: ${res.body.message}`);
+      assertEqual(await Order.countDocuments({}), before, 'no order should be created');
+      assertEqual((await Product.findById(zero[0]._id)).stock, 3, 'stock must be untouched');
+    } finally {
+      await Settings.updateMany(
+        {},
+        {
+          $set: {
+            freeDeliveryThreshold: originalSettings.freeDeliveryThreshold,
+            deliveryFee: originalSettings.deliveryFee,
+            gstPercentage: originalSettings.gstPercentage,
+          },
+        }
+      );
+    }
+  });
+
+  await check('amount conversion rejects zero, negative, fractional and non-finite values', async () => {
+    const { toPaise } = require(path.join(SERVER_ROOT, 'services/razorpayService'));
+
+    for (const value of [0, -1, 0.5, NaN, Infinity]) {
+      let code = null;
+      try {
+        toPaise(value);
+      } catch (error) {
+        code = error.code;
+      }
+      assertEqual(code, 'INVALID_PAYMENT_AMOUNT', `toPaise(${String(value)}) must be rejected`);
+    }
+
+    assertEqual(toPaise(1), 100, 'INR 1 should become 100 paise');
+  });
+
+  await check('missing Razorpay keys return 503 and do not create an order', async () => {
+    const keyId = process.env.RAZORPAY_KEY_ID;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    delete process.env.RAZORPAY_KEY_ID;
+    delete process.env.RAZORPAY_KEY_SECRET;
+
+    try {
+      const products = await makeProducts([
+        { name: 'No Keys Part', price: 400, mrp: 400, stock: 5 },
+      ]);
+      await setCart([{ product: products[0]._id, quantity: 1 }]);
+
+      const before = await Order.countDocuments({});
+      const res = await api('POST', '/api/payments/razorpay/create-order', {
+        token,
+        body: { shippingAddress: ADDRESS },
+      });
+
+      assertEqual(res.status, 503, `expected 503, got ${res.status}: ${res.text}`);
+      assert(/not available|configured/i.test(res.body.message), `message: ${res.body.message}`);
+      assertEqual(await Order.countDocuments({}), before, 'no order should be created');
+      assertEqual((await Product.findById(products[0]._id)).stock, 5, 'stock must be untouched');
+    } finally {
+      process.env.RAZORPAY_KEY_ID = keyId;
+      process.env.RAZORPAY_KEY_SECRET = keySecret;
+    }
+  });
+
+  await check('invalid Razorpay credentials return 503, cancel the order and restore stock', async () => {
+    const products = await makeProducts([
+      { name: 'Bad Credentials Part', price: 450, mrp: 450, stock: 5 },
+    ]);
+    await setCart([{ product: products[0]._id, quantity: 2 }]);
+
+    failNextRazorpayCreate({
+      statusCode: 401,
+      error: { code: 'BAD_REQUEST_ERROR', description: 'Authentication failed' },
+    });
+
+    const res = await api('POST', '/api/payments/razorpay/create-order', {
+      token,
+      body: { shippingAddress: ADDRESS },
+    });
+
+    assertEqual(res.status, 503, `expected 503, got ${res.status}: ${res.text}`);
+    assert(/not configured correctly/i.test(res.body.message), `message: ${res.body.message}`);
+    assert(!/Authentication failed/i.test(res.text), 'raw gateway auth error must not leak');
+
+    const order = await Order.findOne({
+      user: user._id,
+      'items.product': products[0]._id,
+    }).sort({ createdAt: -1 });
+    assert(order, 'internal order should exist for audit');
+    assertEqual(order.paymentStatus, 'failed', 'paymentStatus');
+    assertEqual(order.orderStatus, 'cancelled', 'orderStatus');
+    assertEqual((await Product.findById(products[0]._id)).stock, 5, 'stock restored');
+  });
+
+  await check('Razorpay API failure returns 502, cancels the order and restores stock', async () => {
+    const products = await makeProducts([
+      { name: 'Gateway Failure Part', price: 550, mrp: 550, stock: 4 },
+    ]);
+    await setCart([{ product: products[0]._id, quantity: 1 }]);
+
+    failNextRazorpayCreate({
+      statusCode: 500,
+      error: { code: 'SERVER_ERROR', description: 'Internal server error' },
+    });
+
+    const res = await api('POST', '/api/payments/razorpay/create-order', {
+      token,
+      body: { shippingAddress: ADDRESS },
+    });
+
+    assertEqual(res.status, 502, `expected 502, got ${res.status}: ${res.text}`);
+    assert(/payment gateway could not create/i.test(res.body.message), `message: ${res.body.message}`);
+
+    const order = await Order.findOne({
+      user: user._id,
+      'items.product': products[0]._id,
+    }).sort({ createdAt: -1 });
+    assert(order, 'internal order should exist for audit');
+    assertEqual(order.paymentStatus, 'failed', 'paymentStatus');
+    assertEqual(order.orderStatus, 'cancelled', 'orderStatus');
+    assertEqual((await Product.findById(products[0]._id)).stock, 4, 'stock restored');
+  });
+
+  await check('create-order succeeds again after a transient gateway failure', async () => {
+    const products = await makeProducts([
+      { name: 'Recovery Part', price: 650, mrp: 650, stock: 2 },
+    ]);
+    await setCart([{ product: products[0]._id, quantity: 1 }]);
+
+    const res = await api('POST', '/api/payments/razorpay/create-order', {
+      token,
+      body: { shippingAddress: ADDRESS },
+    });
+
+    assertEqual(res.status, 201, `expected 201, got ${res.status}: ${res.text}`);
+    assert(res.body.data.razorpayOrderId, 'razorpayOrderId present');
+    assert(Number.isInteger(res.body.data.amount), 'amount must be integer paise');
+    assert(res.body.data.amount > 0, 'amount must be positive');
+    assertEqual(res.body.data.currency, 'INR', 'currency');
+
+    const order = await Order.findById(res.body.data.internalOrderId);
+    assertEqual(order.paymentStatus, 'pending', 'paymentStatus');
+  });
+
+  // =======================================================================
+  suite('11. Payment availability reflects real credential authentication');
+
+  const razorpayConfig = require(path.join(SERVER_ROOT, 'config/razorpay'));
+
+  await check('status is unavailable when Razorpay rejects the key pair', async () => {
+    failNextRazorpayCredentialCheck({
+      statusCode: 401,
+      error: { code: 'BAD_REQUEST_ERROR', description: 'Authentication failed' },
+    });
+
+    const status = await razorpayConfig.validateRazorpayCredentials({ force: true });
+    assertEqual(status.available, false, 'available must not be true on 401');
+    assertEqual(status.state, 'auth_failed', 'state');
+
+    const res = await api('GET', '/api/payments/razorpay/status');
+    assertEqual(res.status, 200, 'status endpoint: ' + res.text);
+    assertEqual(res.body.data.available, false, 'available');
+    assertEqual(res.body.data.state, 'auth_failed', 'state');
+    assert(!res.text.includes(process.env.RAZORPAY_KEY_SECRET), 'secret leaked');
+  });
+
+  await check('status becomes available again after authentication succeeds', async () => {
+    const status = await razorpayConfig.validateRazorpayCredentials({ force: true });
+    assertEqual(status.available, true, 'available after successful check');
+    assertEqual(status.state, 'verified', 'state');
+
+    const res = await api('GET', '/api/payments/razorpay/status');
+    assertEqual(res.status, 200, 'status endpoint: ' + res.text);
+    assertEqual(res.body.data.available, true, 'available');
   });
 
   // =======================================================================

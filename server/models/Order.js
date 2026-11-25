@@ -26,6 +26,15 @@ const orderItemSchema = new mongoose.Schema({
    * product: the safer direction to fail in.
    */
   deactivatedByStockOut: { type: Boolean, default: false },
+  // Snapshot of the product's shipping measurements at order time. Snapshotting
+  // rather than joining keeps the shipment reproducible even if the product is
+  // edited or deleted later. `null` means "not captured" and makes the shipping
+  // service use the configured fallback package instead.
+  weight: { type: Number, default: null, min: 0 },
+  length: { type: Number, default: null, min: 0 },
+  breadth: { type: Number, default: null, min: 0 },
+  height: { type: Number, default: null, min: 0 },
+  hsnCode: { type: String, default: '' },
 });
 
 const timelineSchema = new mongoose.Schema({
@@ -33,6 +42,79 @@ const timelineSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now },
   note: { type: String, default: '' },
 });
+
+const trackingEventSchema = new mongoose.Schema(
+  {
+    status: { type: String, default: '' },
+    activity: { type: String, default: '' },
+    location: { type: String, default: '' },
+    date: { type: Date, default: Date.now },
+    awbCode: { type: String, default: '' },
+    source: { type: String, default: 'shiprocket' },
+  },
+  { _id: false }
+);
+
+/**
+ * Shipping/logistics state for an order.
+ *
+ * Every field is optional with a safe default so orders created before this
+ * integration existed continue to load and serialize unchanged. `provider` is
+ * `manual` until a real Shiprocket shipment is created; that is why the creation
+ * claim can safely use it as a marker.
+ */
+const shippingSchema = new mongoose.Schema(
+  {
+    provider: {
+      type: String,
+      enum: ['manual', 'shiprocket'],
+      default: 'manual',
+    },
+    // Shiprocket's own numeric ids. Stored as strings because that is how they
+    // come back from some endpoints and because they are opaque identifiers.
+    shipmentId: { type: String },
+    shiprocketOrderId: { type: String },
+    awbCode: { type: String },
+    courierName: { type: String, default: '' },
+    courierCompanyId: { type: String, default: '' },
+    shipmentStatus: { type: String, default: 'not_created' },
+    trackingUrl: { type: String, default: '' },
+    labelUrl: { type: String, default: '' },
+    manifestUrl: { type: String, default: '' },
+    pickupScheduledDate: { type: Date, default: null },
+    estimatedDeliveryDate: { type: Date, default: null },
+    shippingCharges: { type: Number, default: 0, min: 0 },
+    shippingMethod: {
+      type: String,
+      enum: ['prepaid', 'cod', ''],
+      default: '',
+    },
+    lastTrackingUpdate: { type: Date, default: null },
+    lastSyncedAt: { type: Date, default: null },
+    trackingHistory: { type: [trackingEventSchema], default: [] },
+
+    // Idempotency / diagnostics for shipment creation.
+    creationState: {
+      type: String,
+      enum: ['idle', 'creating', 'created', 'failed'],
+      default: 'idle',
+    },
+    creationStartedAt: { type: Date, default: null },
+    failureReason: { type: String, default: '' },
+    lastErrorAt: { type: Date, default: null },
+
+    // Idempotency keys for inbound webhooks. Bounded with $slice on write.
+    webhookEvents: { type: [String], default: [] },
+
+    pickupToken: { type: String, default: '' },
+    pickupStatus: { type: String, default: '' },
+    labelGeneratedAt: { type: Date, default: null },
+    manifestGeneratedAt: { type: Date, default: null },
+    cancelledAt: { type: Date, default: null },
+    rtoStatus: { type: String, default: '' },
+  },
+  { _id: false }
+);
 
 const orderSchema = new mongoose.Schema(
   {
@@ -93,6 +175,7 @@ const orderSchema = new mongoose.Schema(
     stockRestored: { type: Boolean, default: false },
     notes: { type: String, default: '' },
     timeline: [timelineSchema],
+    shipping: { type: shippingSchema, default: () => ({}) },
   },
   { timestamps: true }
 );
@@ -116,6 +199,24 @@ orderSchema.index(
 orderSchema.index({ user: 1, orderStatus: 1, 'items.product': 1 });
 
 /**
+ * Shipping indexes.
+ *
+ * `shiprocketOrderId` is unique+sparse so the database itself is the final
+ * guarantee that one internal order can never be pushed to Shiprocket twice,
+ * even if two workers race the application-level claim. Sparse is essential:
+ * orders that were never shipped have no value for the field and are therefore
+ * not indexed at all.
+ */
+orderSchema.index(
+  { 'shipping.shiprocketOrderId': 1 },
+  { unique: true, sparse: true }
+);
+orderSchema.index({ 'shipping.shipmentId': 1 }, { sparse: true });
+orderSchema.index({ 'shipping.awbCode': 1 }, { sparse: true });
+orderSchema.index({ 'shipping.shipmentStatus': 1, createdAt: -1 });
+orderSchema.index({ 'shipping.creationState': 1 });
+
+/**
  * The exact field list every order read endpoint is allowed to return.
  *
  * This exists because of a trap in the `toJSON` transform below: `.lean()`
@@ -131,6 +232,7 @@ orderSchema.index({ user: 1, orderStatus: 1, 'items.product': 1 });
  */
 const ORDER_PUBLIC_FIELDS = [
   '_id',
+  'orderNumber',
   'user',
   'items',
   'shippingAddress',
@@ -152,6 +254,7 @@ const ORDER_PUBLIC_FIELDS = [
   'stockRestored',
   'notes',
   'timeline',
+  'shipping',
   'createdAt',
   'updatedAt',
 ].join(' ');
@@ -165,6 +268,8 @@ orderSchema.set('toJSON', {
   transform: (doc, ret) => {
     delete ret.razorpaySignature;
     delete ret.razorpayWebhookEvents;
+    // Internal idempotency keys must never be exposed to a client.
+    if (ret.shipping) delete ret.shipping.webhookEvents;
     delete ret.__v;
     return ret;
   },

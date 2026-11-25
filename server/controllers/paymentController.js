@@ -16,6 +16,7 @@ const {
   validateRazorpayCredentials,
 } = require('../config/razorpay');
 const ApiError = require('../services/ApiError');
+const { scheduleShipmentCreation } = require('../services/shipping.service');
 
 // A pending online order older than this is treated as abandoned: its stock
 // reservation is released and a fresh order is created on the next attempt.
@@ -195,8 +196,10 @@ exports.createRazorpayOrder = async (req, res, next) => {
 
     const notes = String(req.body.notes || '').slice(0, 500);
 
-    const { orderItems, totals } = await buildOrderFromCart({
+    const { orderItems, totals, shippingQuote } = await buildOrderFromCart({
       userId: req.user._id,
+      shippingAddress: address,
+      paymentMethod: 'online',
     });
 
     // Reject an unpayable total before creating an internal order or reserving
@@ -241,6 +244,17 @@ exports.createRazorpayOrder = async (req, res, next) => {
         cartFingerprint: fingerprint,
         paymentExpiresAt: paymentExpiresAt(),
         notes,
+        shipping: {
+          provider: 'manual',
+          shippingMethod: 'prepaid',
+          shippingCharges: totals.shippingFee,
+          courierName: shippingQuote?.courierName || '',
+          courierCompanyId: shippingQuote?.courierCompanyId
+            ? String(shippingQuote.courierCompanyId)
+            : '',
+          estimatedDeliveryDate: shippingQuote?.estimatedDeliveryDate || null,
+          creationState: 'idle',
+        },
       });
 
       // Reserve stock while the customer completes the payment so the same
@@ -440,6 +454,10 @@ exports.verifyRazorpayPayment = async (req, res, next) => {
     await clearServerCart(updated.user);
     await sendConfirmationEmail(updated);
 
+    // Fire-and-forget: payment success must not fail because the carrier is
+    // briefly unavailable. The admin can retry from the Shipping page.
+    scheduleShipmentCreation(updated._id);
+
     res.json({
       success: true,
       message: 'Payment verified successfully',
@@ -588,6 +606,7 @@ const markOrderPaidFromWebhook = async (order, razorpayPaymentId) => {
   await stockService.ensureStockDeducted(updated);
   await clearServerCart(updated.user);
   await sendConfirmationEmail(updated);
+  scheduleShipmentCreation(updated._id);
 };
 
 const markOrderFailedFromWebhook = async (order, reason) => {

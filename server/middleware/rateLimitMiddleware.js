@@ -80,6 +80,39 @@ const paymentLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Checkout rate quotes and admin shipping actions. Quote calls hit the carrier,
+// so they are capped more tightly than ordinary reads. Override with
+// SHIPPING_RATE_LIMIT_MAX.
+const shippingLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.SHIPPING_RATE_LIMIT_MAX) || 120,
+  store: buildStore('shipping', { windowMs: 15 * 60 * 1000 }),
+  message: {
+    success: false,
+    message: 'Too many shipping requests, please try again later',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Shiprocket webhooks are machine-to-machine and can burst when many shipments
+ * move at once, so they get a much larger ceiling. The shared-secret check, not
+ * this limit, is the security boundary. Override with
+ * SHIPROCKET_WEBHOOK_RATE_LIMIT_MAX.
+ */
+const shippingWebhookLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.SHIPROCKET_WEBHOOK_RATE_LIMIT_MAX) || 1000,
+  store: buildStore('shipping-webhook', { windowMs: 15 * 60 * 1000 }),
+  message: {
+    success: false,
+    message: 'Too many shipping webhook requests',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 /**
  * Wraps a limiter so an unavailable Redis store produces a defined response
  * instead of an unhandled error.
@@ -137,4 +170,6 @@ module.exports = {
   emailLimiter: withStoreFailurePolicy(emailLimiter),
   otpLimiter: withStoreFailurePolicy(otpLimiter),
   paymentLimiter: withStoreFailurePolicy(paymentLimiter),
+  shippingLimiter: withStoreFailurePolicy(shippingLimiter),
+  shippingWebhookLimiter: withStoreFailurePolicy(shippingWebhookLimiter),
 };

@@ -2,6 +2,7 @@ const Cart = require('../models/Cart');
 const Product = require('../models/Product');
 const { getSettings } = require('../controllers/settingsController');
 const ApiError = require('./ApiError');
+const { quoteShipping } = require('./shipping.service');
 
 const round2 = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 
@@ -13,7 +14,7 @@ const round2 = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 1
  * description, the specifications Map and every image URL over the wire.
  */
 const PRICING_PRODUCT_FIELDS =
-  '_id name sku price mrp stock isActive images';
+  '_id name sku price mrp stock isActive images weight length breadth height hsnCode';
 
 /**
  * Rebuilds the order lines and totals straight from MongoDB. The cart rows
@@ -21,7 +22,12 @@ const PRICING_PRODUCT_FIELDS =
  * read from the cart, and price/mrp/stock always come from the Product
  * collection.
  */
-const buildOrderFromCart = async ({ userId, cart: providedCart } = {}) => {
+const buildOrderFromCart = async ({
+  userId,
+  cart: providedCart,
+  shippingAddress,
+  paymentMethod,
+} = {}) => {
   /**
    * The cart is read WITHOUT `populate('items.product')`.
    *
@@ -87,6 +93,14 @@ const buildOrderFromCart = async ({ userId, cart: providedCart } = {}) => {
       price: product.price,
       image:
         product.images && product.images.length > 0 ? product.images[0].url : '',
+      // Optional shipping measurements. Null is kept deliberately so the
+      // shipping service can tell "not captured" apart from a real zero and
+      // fall back to the configured defaults.
+      weight: product.weight ?? null,
+      length: product.length ?? null,
+      breadth: product.breadth ?? null,
+      height: product.height ?? null,
+      hsnCode: product.hsnCode || '',
       // Records the CAUSE of a hidden product, not a copy of its state: true only
       // when this very line is what takes the stock to zero and auto-deactivates the
       // product (finding F-07). A cancellation may then safely bring it back, whereas
@@ -109,7 +123,32 @@ const buildOrderFromCart = async ({ userId, cart: providedCart } = {}) => {
   const deliveryFee = Number(settings.deliveryFee) || 0;
   const gstPercentage = Number(settings.gstPercentage) || 0;
 
-  const shippingFee = subtotal >= freeDeliveryThreshold ? 0 : deliveryFee;
+  const payableSubtotal = subtotal - totalDiscount;
+
+  let shippingFee = subtotal >= freeDeliveryThreshold ? 0 : deliveryFee;
+  let shippingQuote = null;
+
+  /**
+   * Live Shiprocket rating is optional by design. A missing bid, a carrier
+   * outage or missing pickup configuration must never block checkout, so the
+   * existing Settings-based fee stays as the fallback and `quoteShipping`
+   * resolves instead of throwing.
+   */
+  if (shippingAddress?.pincode) {
+    shippingQuote = await quoteShipping({
+      deliveryPincode: shippingAddress.pincode,
+      items: orderItems,
+      declaredValue: payableSubtotal,
+      cod: paymentMethod === 'cod',
+      subtotal,
+      freeDeliveryThreshold,
+    });
+
+    if (shippingQuote?.available && shippingQuote?.used) {
+      shippingFee = shippingQuote.free ? 0 : shippingQuote.charge;
+    }
+  }
+
   // Matches the existing COD formula exactly so both paths always agree.
   const gstAmount = Math.round((subtotal - totalDiscount) * gstPercentage) / 100;
   const totalAmount = round2(subtotal - totalDiscount + shippingFee + gstAmount);
@@ -118,6 +157,7 @@ const buildOrderFromCart = async ({ userId, cart: providedCart } = {}) => {
     cart,
     orderItems,
     cartLines,
+    shippingQuote,
     totals: {
       subtotal: round2(subtotal - totalDiscount),
       grossSubtotal: round2(subtotal),

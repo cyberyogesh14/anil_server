@@ -75,6 +75,18 @@ const productSchema = new mongoose.Schema(
     mrp: { type: Number, required: true, min: 0 },
     discount: { type: Number, default: 0, min: 0 },
     stock: { type: Number, required: true, default: 0, min: 0 },
+    /**
+     * Optional shipping measurements. They are NOT guessed at read time: when a
+     * product has no weight, the shipping service falls back to the values the
+     * operator configured in SHIPROCKET_DEFAULT_*_ and marks the order as using
+     * a fallback package. Storing them per product is what lets a real quote be
+     * calculated from real data instead of a placeholder.
+     */
+    weight: { type: Number, default: null, min: 0 },
+    length: { type: Number, default: null, min: 0 },
+    breadth: { type: Number, default: null, min: 0 },
+    height: { type: Number, default: null, min: 0 },
+    hsnCode: { type: String, default: '', trim: true },
     images: [
       {
         url: { type: String, default: '' },
@@ -86,6 +98,22 @@ const productSchema = new mongoose.Schema(
     rating: { type: Number, default: 0, min: 0, max: 5 },
     numReviews: { type: Number, default: 0 },
     specifications: { type: Map, of: String, default: {} },
+    productGroup: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductGroup' },
+    partNumberKey: { type: String, unique: true, sparse: true },
+    skuKey: { type: String, unique: true, sparse: true },
+    availability: {
+      type: String,
+      enum: ['in_stock', 'out_of_stock', 'preorder', 'discontinued'],
+      default: 'in_stock',
+    },
+    subcategory: { type: String, default: '', trim: true },
+    compatibility: { type: String, default: '' },
+    additionalInfo: { type: String, default: '' },
+    tags: { type: [String], default: [] },
+    titleOverride: { type: String, default: '', trim: true },
+    descriptionOverride: { type: String, default: '' },
+    seoTitleOverride: { type: String, default: '', trim: true },
+    seoDescriptionOverride: { type: String, default: '' },
   },
   { timestamps: true }
 );
@@ -166,6 +194,9 @@ productSchema.index({ condition: 1, createdAt: -1 });
 
 /** `GET /api/products/category/:categoryId`, which filters on both fields. */
 productSchema.index({ category: 1, isActive: 1, createdAt: -1 });
+
+productSchema.index({ productGroup: 1, isActive: 1 });
+productSchema.index({ productGroup: 1, partNumber: 1 });
 
 productSchema.pre('save', function (next) {
   if (this.isModified('name')) {

@@ -597,11 +597,11 @@ const main = async () => {
   // =======================================================================
   suite('8. Tata BS6 hero filter reaches the API (audit H4 regression guard)');
 
-  await check('the hero CTA links with emissionStandard, not compatibility', async () => {
+  await check('the hero CTA links to the Tata BS6 landing page, not compatibility', async () => {
     const src = readClientSource('src/components/HeroSection.jsx');
     assert(
-      src.includes('emissionStandard=BS6'),
-      'HeroSection must link to ?emissionStandard=BS6'
+      src.includes('to="/tata-bs6-parts"'),
+      'HeroSection must link to /tata-bs6-parts'
     );
     assert(
       !/compatibility=BS6/.test(src),

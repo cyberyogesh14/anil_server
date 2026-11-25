@@ -7,6 +7,10 @@ const Category = require('../models/Category');
 const Settings = require('../models/Settings');
 const emailService = require('../services/emailService');
 const stockService = require('../services/stockService');
+const {
+  scheduleShipmentCreation,
+  cancelShipmentForOrder,
+} = require('../services/shipping.service');
 const { getSettings } = require('./settingsController');
 const { assertSafeQuery } = require('../utils/safeQuery');
 const { escapeRegex } = require('../utils/safeRegex');
@@ -644,6 +648,25 @@ exports.updateOrderStatus = async (req, res, next) => {
     }
 
     await order.save();
+
+    if (orderStatus === 'cancelled' && order.shipping?.shiprocketOrderId) {
+      // Best-effort: the customer's cancellation must succeed even if the
+      // carrier is unreachable. An admin can cancel the shipment later.
+      try {
+        await cancelShipmentForOrder(order._id, { reason: note || 'Order cancelled by admin' });
+      } catch (error) {
+        console.error(
+          `[shiprocket] cancellation failed for order ${order.orderNumber}: ${error.message}`
+        );
+      }
+    } else if (
+      ['confirmed', 'processing'].includes(orderStatus) &&
+      previousStatus !== orderStatus
+    ) {
+      // What matters is whether the order may ship, not which status the admin
+      // happened to click first. The shipping service re-checks eligibility.
+      scheduleShipmentCreation(order._id);
+    }
 
     const statusMessages = {
       confirmed: 'Your order has been confirmed',

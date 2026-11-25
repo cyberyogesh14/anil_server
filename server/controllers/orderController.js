@@ -3,6 +3,7 @@ const { ORDER_PUBLIC_FIELDS } = require('../models/Order');
 const Product = require('../models/Product');
 const emailService = require('../services/emailService');
 const stockService = require('../services/stockService');
+const { cancelShipmentForOrder } = require('../services/shipping.service');
 const ApiError = require('../services/ApiError');
 const { runInTransaction } = require('../services/transactionRunner');
 const generateOrderId = require('../utils/generateOrderId');
@@ -76,9 +77,12 @@ exports.createOrder = async (req, res, next) => {
     const shippingAddress = normaliseAddress(req.body.shippingAddress);
     validateAddress(shippingAddress);
 
-    const { cart, orderItems, cartLines, totals } = await buildOrderFromCart({
-      userId: req.user._id,
-    });
+    const { cart, orderItems, cartLines, totals, shippingQuote } =
+      await buildOrderFromCart({
+        userId: req.user._id,
+        shippingAddress,
+        paymentMethod,
+      });
 
     /**
      * Audit finding F-02. Creating the order, decrementing the stock and emptying
@@ -131,6 +135,18 @@ exports.createOrder = async (req, res, next) => {
             paymentStatus: 'cod',
             orderStatus: 'pending',
             notes: notes || '',
+            shipping: {
+              provider: 'manual',
+              shippingMethod: 'cod',
+              shippingCharges: totals.shippingFee,
+              courierName: shippingQuote?.courierName || '',
+              courierCompanyId: shippingQuote?.courierCompanyId
+                ? String(shippingQuote.courierCompanyId)
+                : '',
+              estimatedDeliveryDate:
+                shippingQuote?.estimatedDeliveryDate || null,
+              creationState: 'idle',
+            },
           },
           session
         );
@@ -387,6 +403,21 @@ exports.cancelOrder = async (req, res, next) => {
     );
 
     await order.save();
+
+    if (order.shipping?.shiprocketOrderId) {
+      // Best-effort: the customer's cancellation succeeds even when the carrier
+      // is unreachable. Stock was already restored above; the webhook for this
+      // cancellation deliberately does not restore it again.
+      try {
+        await cancelShipmentForOrder(order._id, {
+          reason: 'Cancelled by customer',
+        });
+      } catch (error) {
+        console.error(
+          `[shiprocket] cancellation failed for order ${order.orderNumber}: ${error.message}`
+        );
+      }
+    }
 
     res.json({
       success: true,

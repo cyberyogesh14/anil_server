@@ -22,6 +22,7 @@ const redisClient = require('./config/redis');
 const paymentRoutes = require('./routes/paymentRoutes');
 const authRoutes = require('./routes/authRoutes');
 const productRoutes = require('./routes/productRoutes');
+const productGroupRoutes = require('./routes/productGroupRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
 const cartRoutes = require('./routes/cartRoutes');
 const wishlistRoutes = require('./routes/wishlistRoutes');
@@ -31,6 +32,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const reviewRoutes = require('./routes/reviewRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
+const shippingRoutes = require('./routes/shippingRoutes');
 
 const app = express();
 
@@ -77,8 +79,10 @@ app.use(
 const requestLogger = buildLogger();
 if (requestLogger) app.use(requestLogger);
 
-// Razorpay webhook must be registered before express.json()
+// Webhooks must be registered before express.json() so they can verify the
+// untouched request bytes (Razorpay HMAC, Shiprocket shared secret/HMAC).
 app.use('/api/payments/razorpay', paymentRoutes.webhookRouter);
+app.use('/api/shipping', shippingRoutes.webhookRouter);
 
 // Body size limits
 const jsonLimit = process.env.JSON_BODY_LIMIT || '1mb';
@@ -101,11 +105,13 @@ app.use('/api', apiLimiter);
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
+app.use('/api/product-groups', productGroupRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/cart', cartRoutes);
 app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/shipping', shippingRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/email', emailRoutes);
